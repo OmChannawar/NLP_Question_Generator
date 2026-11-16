@@ -57,6 +57,9 @@ question-generator/
 ├── requirements.txt    # all dependencies
 ├── .streamlit/config.toml  # server config (5 MB upload limit)
 ├── README.md           # this documentation
+├── .gitignore          # files excluded from Git
+├── notebooks/
+│   └── question_generation_demo.ipynb   # step-by-step demo of the pipeline (no UI)
 └── qgen/
     ├── extractor.py    # file reading, cleaning, chunking
     ├── generator.py    # Seq2Seq LLM: prompts, question & answer generation, validation
