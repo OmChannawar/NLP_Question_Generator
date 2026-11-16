@@ -1,0 +1,3 @@
+[server]
+# Hard limit enforced by Streamlit's uploader widget (in MB)
+maxUploadSize = 5
