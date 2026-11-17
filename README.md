@@ -31,7 +31,9 @@ PDF / DOCX ──► text extraction ──► cleaning ──► sentence split
    * **Mid** – conceptual understanding (Explain / Describe / How)
    * **High** – analysis & evaluation (Why / Compare / Justify)
 
-   Beam search is used first; if the question is a near-duplicate, sampling is used to get a different one.
+   Passages are processed in **batches**. Decoding is greedy by default (fast); an optional beam-search mode
+   gives better wording but is slower. Near-duplicate questions are detected on content words and regenerated
+   with sampling in later rounds. Answers are then generated in batches too.
 4. **Answer + keywords** – the same model answers each question from its passage; TF-IDF ranks the
    answer's terms (IDF learned from the passage sentences) and the top key-phrases are shown as chips.
 
@@ -93,7 +95,10 @@ Open http://localhost:8501. The first generation downloads the chosen model (Bas
 ## 7. Known limitations (please read)
 * Flan-T5 is a small LLM; some questions may be vague, repetitive or only loosely match the chosen difficulty. **Flan-T5 Large** is noticeably better than Small.
 * Answers and keywords are produced by the model from the passage – review them before using in an exam.
-* Speed: Base on CPU takes a few seconds per question; a GPU is much faster.
+* Speed: the app runs the model in bfloat16 on an NVIDIA GPU (float32 on CPU), batches passages, and uses greedy decoding by default.
+  A GPU makes by far the biggest difference – the sidebar shows whether one was detected. On CPU choose **Flan-T5 Small** or keep
+  **Fast** mode with Base. **Better quality** (beam search) and **Large** are slower. The CUDA build of PyTorch must be installed
+  (https://pytorch.org/get-started/locally/) – plain `pip install torch` often gives a CPU-only build on Windows.
 * Uploads are limited to 5 MB (`.streamlit/config.toml` and `MAX_UPLOAD_MB` in `app.py`). Run `streamlit run app.py` from the project folder so the config is picked up.
 * Scanned PDFs need OCR first. Math-heavy or table-heavy pages are skipped by the prose filter.
 * Fewer questions than requested may be returned when the document is short.

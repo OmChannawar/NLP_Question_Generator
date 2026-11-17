@@ -5,6 +5,7 @@ Run with:  streamlit run app.py
 import html
 
 import streamlit as st
+import torch
 
 from qgen.extractor import extract_text
 from qgen.generator import ALLOWED_COUNTS, DIFFICULTY_LEVELS, MODEL_OPTIONS, QuestionGenerator
@@ -60,6 +61,14 @@ with st.sidebar:
     model_label = st.selectbox("Seq2Seq LLM", list(MODEL_OPTIONS), index=1)
     st.caption("The first run downloads the model weights from Hugging Face. "
                "Larger models give better questions but are slower.")
+    mode = st.radio("Generation mode", ["Fast (greedy)", "Better quality (beam search, slower)"],
+                    help="Beam search explores 4 candidates per word: usually nicer questions, roughly 2-4x slower.")
+    num_beams = 1 if mode.startswith("Fast") else 4
+    if torch.cuda.is_available():
+        st.success(f"GPU detected: {torch.cuda.get_device_name(0)}")
+    else:
+        st.warning("No GPU detected – running on CPU, which is slow. Install a CUDA build of PyTorch "
+                   "if you have an NVIDIA GPU, or choose Flan-T5 Small.")
     st.divider()
     st.markdown("**Pipeline**\n\n1. Extract text (PDF/DOCX)\n2. Split into passages\n"
                 "3. Flan-T5 encoder–decoder writes questions\n4. TF-IDF keywords of each answer")
@@ -96,7 +105,7 @@ if generate_clicked and uploaded:
         with st.spinner("Loading model (first run downloads weights)…"):
             generator = load_generator(MODEL_OPTIONS[model_label])
         bar = st.progress(0.0, text="Generating questions…")
-        items = generate_quiz(text, generator, difficulty.lower(), num_q,
+        items = generate_quiz(text, generator, difficulty.lower(), num_q, num_beams=num_beams,
                               progress_callback=lambda p: bar.progress(p, text=f"Generating questions… {int(p * 100)}%"))
         bar.empty()
         st.session_state.update(items=items, show_keywords=False, difficulty=difficulty)

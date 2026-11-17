@@ -12,9 +12,10 @@ NLP concepts used
 """
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import torch
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 from .keywords import extract_keywords
@@ -27,6 +28,7 @@ MODEL_OPTIONS = {
 }
 DIFFICULTY_LEVELS = ["low", "mid", "high"]
 ALLOWED_COUNTS = [5, 10, 15, 20, 25, 30]  # multiples of 5, max 30
+MAX_ATTEMPTS = 4  # rounds of generation; round 1 is greedy/beam, later rounds sample to avoid duplicates
 
 # One instruction per difficulty level (aligned with Bloom's taxonomy).
 DIFFICULTY_INSTRUCTIONS = {
@@ -56,12 +58,17 @@ def validate_request(num_questions: int, difficulty: str) -> None:
 
 
 def _tokens(text: str) -> set:
-    """Lower-cased word set used for duplicate detection."""
-    return set(re.findall(r"[a-z0-9]+", text.lower()))
+    """
+    Lower-cased *content-word* set used for duplicate detection. Filler words ("what", "is", "the", ...)
+    are removed, otherwise "What is the function of X?" and "What is the function of Y?" would look identical.
+    """
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    content = {w for w in words if w not in ENGLISH_STOP_WORDS}
+    return content or set(words)
 
 
 def is_duplicate(question: str, seen: List[str], threshold: float = 0.7) -> bool:
-    """True if `question` has Jaccard word-overlap >= threshold with any already accepted question."""
+    """True if `question` has Jaccard content-word overlap >= threshold with any already accepted question."""
     a = _tokens(question)
     for other in seen:
         b = _tokens(other)
@@ -71,13 +78,18 @@ def is_duplicate(question: str, seen: List[str], threshold: float = 0.7) -> bool
 
 
 class QuestionGenerator:
-    """Wraps a Seq2Seq Transformer LLM and exposes question + answer generation."""
+    """Wraps a Seq2Seq Transformer LLM and exposes (batched) question + answer generation."""
 
     def __init__(self, model_name: str = "google/flan-t5-base"):
-        """Download (first run only) and load the tokenizer and model on GPU if available."""
+        """
+        Download (first run only) and load the tokenizer and model.
+        On an NVIDIA GPU the model runs in bfloat16 (about 2x faster, half the memory);
+        on CPU it runs in float32.
+        """
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = torch.bfloat16 if self.device == "cuda" and torch.cuda.is_bf16_supported() else torch.float32
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to(self.device).eval()
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name, torch_dtype=dtype).to(self.device).eval()
 
     # ------------------------------------------------------------------ prompt builders
     @staticmethod
@@ -93,45 +105,88 @@ class QuestionGenerator:
                 f"Passage: {context}\n\nQuestion: {question}\n\nAnswer:")
 
     # ------------------------------------------------------------------ low-level decoding
-    def _generate(self, prompt: str, max_new_tokens: int, sample: bool = False) -> str:
+    def _generate_batch(self, prompts: List[str], max_new_tokens: int, sample: bool = False,
+                        num_beams: int = 1) -> List[str]:
         """
-        Encode `prompt`, run the encoder-decoder and decode the output text.
-        sample=False -> beam search (stable, best quality)
-        sample=True  -> nucleus sampling (used to get a *different* question on retries)
+        Encode several prompts at once (padded into one tensor), run the encoder-decoder once
+        for the whole batch and decode every output. Batching is the main speed-up over
+        generating one passage at a time.
+
+        sample=False -> greedy search (num_beams=1) or beam search (num_beams>1, slower, better)
+        sample=True  -> nucleus sampling (used on retries to get a *different* question)
         """
-        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512).to(self.device)
-        gen_args = (dict(do_sample=True, top_p=0.92, temperature=0.9)
-                    if sample else dict(num_beams=4, early_stopping=True))
+        inputs = self.tokenizer(prompts, return_tensors="pt", padding=True,
+                                truncation=True, max_length=512).to(self.device)
+        if sample:
+            gen_args = dict(do_sample=True, top_p=0.92, temperature=0.9)
+        else:
+            gen_args = dict(do_sample=False, num_beams=num_beams)
         with torch.inference_mode():
             output = self.model.generate(**inputs, max_new_tokens=max_new_tokens,
                                          no_repeat_ngram_size=3, **gen_args)
-        return self.tokenizer.decode(output[0], skip_special_tokens=True).strip()
+        return [t.strip() for t in self.tokenizer.batch_decode(output, skip_special_tokens=True)]
 
-    # ------------------------------------------------------------------ public API
-    def generate_question(self, context: str, difficulty: str, sample: bool = False) -> str:
-        """Generate one question for `context` at the given difficulty; returns '' if output is unusable."""
-        q = self._generate(self.build_question_prompt(context, difficulty), 48, sample)
-        q = q.strip().strip('"')
-        if len(q.split()) < 4:  # too short to be a real question
+    @staticmethod
+    def _clean_question(raw: str) -> str:
+        """Tidy model output into a proper question; returns '' if it is unusable (too short)."""
+        q = raw.strip().strip('"')
+        if len(q.split()) < 4:
             return ""
         q = q[0].upper() + q[1:]
         return q if q.endswith("?") else q.rstrip(".") + "?"
 
-    def generate_answer(self, context: str, question: str) -> str:
-        """Let the LLM answer its own question from the passage (grounding for the keywords)."""
-        return self._generate(self.build_answer_prompt(context, question), 80)
+    # ------------------------------------------------------------------ public API
+    def generate_question(self, context: str, difficulty: str, sample: bool = False,
+                          num_beams: int = 1) -> str:
+        """Generate a single question for one passage (handy for demos / the notebook)."""
+        raw = self._generate_batch([self.build_question_prompt(context, difficulty)], 48, sample, num_beams)[0]
+        return self._clean_question(raw)
 
-    def generate_item(self, context: str, difficulty: str, seen: Optional[List[str]] = None,
-                      max_attempts: int = 4) -> Optional[QAItem]:
+    def generate_items(self, contexts: List[str], difficulty: str, num_beams: int = 1,
+                       batch_size: Optional[int] = None,
+                       progress_callback: Optional[Callable[[float], None]] = None) -> List[QAItem]:
         """
-        Produce a unique question + answer + keywords for one passage.
-        The first attempt uses beam search; retries use sampling to avoid repeating a question.
-        Returns None if no acceptable, non-duplicate question was produced.
+        Generate one unique question + answer + keywords for every passage in `contexts`.
+
+        Stage 1 (questions): passages are processed in batches. Passages whose question was empty or a
+                             near-duplicate are retried in later rounds using sampling.
+        Stage 2 (answers):   answers for all accepted questions are generated in batches, then keywords
+                             are extracted with TF-IDF.
+
+        progress_callback receives a float in [0, 1]. Passages that never yield a valid question are skipped,
+        so fewer items than passages may be returned.
         """
-        seen = seen or []
-        for attempt in range(max_attempts):
-            question = self.generate_question(context, difficulty, sample=attempt > 0)
-            if question and not is_duplicate(question, seen):
-                answer = self.generate_answer(context, question)
-                return QAItem(question, answer, extract_keywords(answer, context))
-        return None
+        batch_size = batch_size or (8 if self.device == "cuda" else 4)
+        n = len(contexts)
+        questions: List[Optional[str]] = [None] * n
+
+        def report(fraction: float) -> None:
+            if progress_callback:
+                progress_callback(min(fraction, 1.0))
+
+        # ---- stage 1: questions
+        for attempt in range(MAX_ATTEMPTS):
+            pending = [i for i, q in enumerate(questions) if q is None]
+            if not pending:
+                break
+            for s in range(0, len(pending), batch_size):
+                idxs = pending[s:s + batch_size]
+                prompts = [self.build_question_prompt(contexts[i], difficulty) for i in idxs]
+                outputs = self._generate_batch(prompts, 48, sample=attempt > 0, num_beams=num_beams)
+                for i, raw in zip(idxs, outputs):
+                    q = self._clean_question(raw)
+                    if q and not is_duplicate(q, [x for x in questions if x]):
+                        questions[i] = q
+                report(0.6 * sum(q is not None for q in questions) / n)
+
+        # ---- stage 2: answers + keywords
+        keep = [i for i, q in enumerate(questions) if q]
+        answers = {}
+        for s in range(0, len(keep), batch_size):
+            idxs = keep[s:s + batch_size]
+            prompts = [self.build_answer_prompt(contexts[i], questions[i]) for i in idxs]
+            for i, ans in zip(idxs, self._generate_batch(prompts, 64)):
+                answers[i] = ans
+            report(0.6 + 0.4 * min(s + batch_size, len(keep)) / len(keep))
+
+        return [QAItem(questions[i], answers[i], extract_keywords(answers[i], contexts[i])) for i in keep]
