@@ -135,8 +135,10 @@ if items:
             chips = "".join(f'<span class="chip">{html.escape(k)}</span>' for k in it.keywords) \
                     or "<em>No keywords found</em>"
             st.markdown(chips, unsafe_allow_html=True)
-            with st.expander("Model's suggested answer"):
+            with st.expander("Answer & source sentence"):
                 st.write(it.answer)
+                if it.evidence and it.evidence != it.answer:
+                    st.caption("Source: " + it.evidence)
 
     st.download_button("⬇️ Download questions (.txt)",
                        build_export_text(items, st.session_state["difficulty"], st.session_state["show_keywords"]),

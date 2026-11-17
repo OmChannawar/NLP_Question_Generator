@@ -1,41 +1,46 @@
 # 📚 QuizForge – Automatic Question Generation from Textbooks
 
-An NLP project that reads a textbook (**PDF or Word**) and generates exam-style questions at a chosen
+An NLP project that reads a textbook (**PDF or Word**, max **5 MB**) and generates exam-style questions at a chosen
 **difficulty (Low / Mid / High)** and **quantity (5, 10, 15, 20, 25 or 30)**. After generation, an
-**"Answer the questions"** button reveals the **keywords of each answer**.
+**"Answer the questions"** button reveals the **keywords of each answer** (plus the answer and its source sentence).
 
 ## 1. Key NLP / AI concepts
 
 | Concept | Where it is used |
 |---|---|
-| **Seq2Seq** | Flan-T5 is an *encoder–decoder* model: the encoder reads *instruction + passage*, the decoder generates the question (and answer) one token at a time (`qgen/generator.py`). |
-| **Transformers** | Both encoder and decoder are Transformer stacks (self-/cross-attention). Loaded through the Hugging Face `transformers` library (`AutoModelForSeq2SeqLM`). |
-| **LLM** | Flan-T5 is an *instruction-tuned* language model. Difficulty is controlled purely by **prompt engineering** – a different natural-language instruction per level (Bloom's-taxonomy style). |
+| **Seq2Seq** | Flan-T5 is an *encoder–decoder* model: the encoder reads *instruction + answer + passage*, the decoder writes the question token by token (`qgen/generator.py`). |
+| **Transformers** | Both encoder and decoder are Transformer stacks (self-/cross-attention), loaded through Hugging Face `transformers` (`AutoModelForSeq2SeqLM`). |
+| **LLM** | Flan-T5 is an *instruction-tuned* language model. The difficulty is controlled by **prompt engineering** (a different instruction per level, Bloom's-taxonomy style). |
 
-Classical NLP is used around the neural core: regex sentence splitting, text cleaning, and **TF-IDF** keyword extraction.
+Classical NLP surrounds the neural core: layout/heading detection, sentence splitting, **TF-IDF** sentence scoring and keyword extraction.
 
-## 2. How it works
+## 2. How it works (answer-aware question generation)
 
 ```
-PDF / DOCX ──► text extraction ──► cleaning ──► sentence split ──► passages (~170 words)
-                                                                        │ evenly sampled across the book
-                                                                        ▼
-   Streamlit UI  ◄── keywords (TF-IDF) ◄── answer (Flan-T5) ◄── question (Flan-T5 + difficulty prompt)
+PDF / DOCX ─► text + line structure ─► section-aware passages (title + text)
+                                              │
+              pick WHAT to ask: answer candidates (TF-IDF scored) spread over the book
+                                              ▼
+   Streamlit UI ◄─ keywords (TF-IDF) ◄─ checks ◄─ Flan-T5 writes a question FOR that answer
 ```
 
-1. **Extraction** – `pypdf` / `python-docx` read the file; text is cleaned (hyphenation, page numbers).
-2. **Chunking** – sentences are grouped into short passages that fit the 512-token input window; non-prose
-   passages (tables, indexes) are filtered out; N passages are picked evenly across the whole book.
-3. **Question generation** – for each passage, Flan-T5 receives a difficulty-specific instruction:
-   * **Low** – factual recall (What / Who / When / Where)
-   * **Mid** – conceptual understanding (Explain / Describe / How)
-   * **High** – analysis & evaluation (Why / Compare / Justify)
+1. **Extraction** – `pypdf` / `python-docx` read the file and keep line breaks.
+2. **Section-aware passages** – headings are detected (short lines without final punctuation, Word heading styles);
+   bullets/numbered items are re-joined; each passage stays inside one section and carries its title. Syllabus /
+   contents / reference sections are skipped.
+3. **Answer candidates** (`qgen/candidates.py`) – the *answer* is chosen from the book first:
+   * **Low** – a key term (from `Term: definition` or `X is a …` sentences)
+   * **Mid** – an informative sentence (explain / describe style)
+   * **High** – a sentence with reasoning cues (because, helps, prevents, advantage, balance …)
 
-   Passages are processed in **batches**. Decoding is greedy by default (fast); an optional beam-search mode
-   gives better wording but is slower. Near-duplicate questions are detected on content words and regenerated
-   with sampling in later rounds. Answers are then generated in batches too.
-4. **Answer + keywords** – the same model answers each question from its passage; TF-IDF ranks the
-   answer's terms (IDF learned from the passage sentences) and the top key-phrases are shown as chips.
+   Sentences are ranked by document-level TF-IDF; passages are spread evenly over the whole book.
+4. **Question generation** – Flan-T5 receives *style hint + answer + passage* and writes the question
+   (batched; greedy by default, optional beam search).
+5. **Quality checks** – a question is accepted only if (a) its topic words appear in the passage (no hallucinated
+   topics), (b) it does not already contain its short answer, (c) it is not a near-duplicate. Otherwise the slot is
+   retried with another sentence from the same passage.
+6. **Answers & keywords** – the answer is the textbook text itself (it cannot be invented by the model); TF-IDF
+   extracts its keywords.
 
 ## 3. Tech stack
 
@@ -45,9 +50,9 @@ PDF / DOCX ──► text extraction ──► cleaning ──► sentence split
 
 **Backend**
 * **Python 3.9+**
-* **PyTorch** – tensor / GPU computation
+* **PyTorch** – tensor / GPU computation (bfloat16 on NVIDIA GPUs)
 * **Hugging Face Transformers** + **SentencePiece** – Flan-T5 (Small / Base / Large) Seq2Seq LLM and tokenizer
-* **scikit-learn** – TF-IDF keyword extraction
+* **scikit-learn** – TF-IDF scoring and keyword extraction
 * **NumPy** – even sampling of passages
 * **pypdf** and **python-docx** – PDF and Word parsing
 
@@ -55,18 +60,19 @@ PDF / DOCX ──► text extraction ──► cleaning ──► sentence split
 
 ```
 question-generator/
-├── app.py              # Streamlit UI
-├── requirements.txt    # all dependencies
+├── app.py                  # Streamlit UI
+├── requirements.txt        # all dependencies
+├── README.md               # this documentation
+├── .gitignore              # files excluded from Git
 ├── .streamlit/config.toml  # server config (5 MB upload limit)
-├── README.md           # this documentation
-├── .gitignore          # files excluded from Git
 ├── notebooks/
 │   └── question_generation_demo.ipynb   # step-by-step demo of the pipeline (no UI)
 └── qgen/
-    ├── extractor.py    # file reading, cleaning, chunking
-    ├── generator.py    # Seq2Seq LLM: prompts, question & answer generation, validation
-    ├── keywords.py     # TF-IDF keyword extraction
-    └── pipeline.py     # end-to-end orchestration
+    ├── extractor.py        # file reading, heading detection, section-aware chunking
+    ├── candidates.py       # chooses the answers (terms / sentences) the questions will be about
+    ├── generator.py        # Seq2Seq LLM: prompts, batched generation, quality checks
+    ├── keywords.py         # TF-IDF keyword extraction
+    └── pipeline.py         # end-to-end orchestration
 ```
 
 ## 5. Installation & run
@@ -80,7 +86,7 @@ source venv/bin/activate          # Windows:  venv\Scripts\activate
 pip install -r requirements.txt
 #    NVIDIA GPU? install a CUDA build of PyTorch first: https://pytorch.org/get-started/locally/
 
-# 3. start the app
+# 3. start the app (run from the project folder so .streamlit/config.toml is used)
 streamlit run app.py
 ```
 Open http://localhost:8501. The first generation downloads the chosen model (Base ≈ 1 GB) and needs internet once.
@@ -89,20 +95,19 @@ Open http://localhost:8501. The first generation downloads the chosen model (Bas
 1. Upload a `.pdf` or `.docx` textbook, **maximum 5 MB** (must contain selectable text – scanned images are not supported).
 2. Choose the **difficulty** and the **number of questions** (5–30, step 5).
 3. Click **Generate questions**.
-4. Click **Answer the questions (show keywords)** to see the keywords (and the model's suggested answer) per question.
+4. Click **Answer the questions (show keywords)** to see the keywords, the answer and its source sentence.
 5. Optionally download the questions as `.txt`.
 
 ## 7. Known limitations (please read)
-* Flan-T5 is a small LLM; some questions may be vague, repetitive or only loosely match the chosen difficulty. **Flan-T5 Large** is noticeably better than Small.
-* Answers and keywords are produced by the model from the passage – review them before using in an exam.
-* Speed: the app runs the model in bfloat16 on an NVIDIA GPU (float32 on CPU), batches passages, and uses greedy decoding by default.
-  A GPU makes by far the biggest difference – the sidebar shows whether one was detected. On CPU choose **Flan-T5 Small** or keep
-  **Fast** mode with Base. **Better quality** (beam search) and **Large** are slower. The CUDA build of PyTorch must be installed
-  (https://pytorch.org/get-started/locally/) – plain `pip install torch` often gives a CPU-only build on Windows.
-* Uploads are limited to 5 MB (`.streamlit/config.toml` and `MAX_UPLOAD_MB` in `app.py`). Run `streamlit run app.py` from the project folder so the config is picked up.
-* Scanned PDFs need OCR first. Math-heavy or table-heavy pages are skipped by the prose filter.
-* Fewer questions than requested may be returned when the document is short.
+* Flan-T5 is a small LLM: some questions can still be awkwardly worded, and the difficulty match is approximate
+  (it is mostly set by *which sentence* is chosen as the answer). **Flan-T5 Large** and the *Better quality* mode help.
+* Quality depends on document structure. Notes/slides/textbooks with headings and `Term: definition` lines work best;
+  long unstructured prose, tables, formulas and code listings work worse.
+* If the document has too few suitable sentences, fewer questions than requested are returned.
+* Heading detection is heuristic (it can mistake a short line for a heading or miss one).
+* Speed: GPU strongly recommended (the sidebar shows whether one was detected). On CPU use Flan-T5 Small or Base in Fast mode.
+* Uploads are limited to 5 MB. Scanned PDFs need OCR first.
 
 ## 8. Possible extensions
-Fine-tune T5 on SQuAD/RACE for question generation, swap in a larger LLM (e.g. an instruction-tuned Llama/Qwen model),
-add multiple-choice distractors, OCR support, and automatic difficulty scoring.
+Fine-tune T5 on SQuAD/RACE for question generation, round-trip QA verification (answer the question with a QA model and
+compare), swap in a larger LLM, add multiple-choice distractors, OCR support, automatic difficulty scoring.

@@ -1,14 +1,21 @@
 """
 generator.py
 ------------
-Neural question-generation core.
+Neural question-generation core (answer-aware).
 
 NLP concepts used
-  * Seq2Seq      : Flan-T5 is an encoder-decoder (sequence-to-sequence) model. The encoder reads
-                   the textbook passage + instruction; the decoder writes the question token by token.
-  * Transformers : the architecture (self-attention) and the Hugging Face `transformers` library.
-  * LLM          : Flan-T5 is an instruction-tuned language model, so the *difficulty level* is
-                   controlled simply by changing the natural-language prompt (prompt engineering).
+  * Seq2Seq      : Flan-T5 is an encoder-decoder (sequence-to-sequence) model. The encoder reads the
+                   instruction + answer + textbook passage; the decoder writes the question token by token.
+  * Transformers : the architecture (self-/cross-attention) and the Hugging Face `transformers` library.
+  * LLM          : Flan-T5 is an instruction-tuned language model, so the *difficulty level* is controlled by
+                   the natural-language prompt (prompt engineering).
+
+Quality safeguards (why questions are no longer "random")
+  1. Answer-aware generation: the answer is taken from the textbook first (see candidates.py), then the LLM
+     only has to write a question for it -> the question is answerable by construction.
+  2. Grounding check: a question whose key words are not found in the passage is rejected (hallucination).
+  3. Leak check: a question that already contains its own short answer is rejected.
+  4. Duplicate check on content words; rejected slots are retried with the next candidate sentence.
 """
 import re
 from dataclasses import dataclass, field
@@ -18,6 +25,7 @@ import torch
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
+from .candidates import Candidate
 from .keywords import extract_keywords
 
 # --------------------------------------------------------------------------- configuration
@@ -28,27 +36,43 @@ MODEL_OPTIONS = {
 }
 DIFFICULTY_LEVELS = ["low", "mid", "high"]
 ALLOWED_COUNTS = [5, 10, 15, 20, 25, 30]  # multiples of 5, max 30
-MAX_ATTEMPTS = 4  # rounds of generation; round 1 is greedy/beam, later rounds sample to avoid duplicates
+MAX_ATTEMPTS = 4  # rounds per question slot; later rounds use the next candidate / sampling
 
-# One instruction per difficulty level (aligned with Bloom's taxonomy).
-DIFFICULTY_INSTRUCTIONS = {
-    "low": "Write one simple factual recall question about the passage. "
-           "It must start with What, Who, When, Where or Which and be answerable by a single fact from the passage.",
-    "mid": "Write one conceptual question about the passage that tests understanding. "
-           "It should ask the student to explain, describe or define an idea, for example starting with How or Explain.",
-    "high": "Write one challenging analytical question about the passage that needs reasoning. "
-            "It should ask the student to analyse, compare, justify or evaluate, for example starting with Why or How does.",
+# Style hint per difficulty level (aligned with Bloom's taxonomy).
+STYLE_HINTS = {
+    "low": "The question must be a simple factual question starting with What, Which, Who or Where.",
+    "mid": "The question must ask the student to explain or describe an idea, for example starting with "
+           "How or Explain.",
+    "high": "The question must be challenging and need reasoning, such as why something works or how "
+            "two things compare.",
 }
+# words that appear in questions but carry no topic information
+QUESTION_FILLER = {
+    # instruction verbs
+    "explain", "describe", "compare", "evaluate", "define", "discuss", "justify", "analyse", "analyze",
+    "identify", "state", "list", "give", "contrast", "differentiate", "illustrate", "summarize",
+    # generic question vocabulary that is rarely copied from a passage
+    "main", "following", "term", "mean", "means", "meant", "called", "name", "role", "purpose", "reason",
+    "reasons", "work", "works", "working", "practice", "important", "importance", "significant",
+    "significance", "benefit", "benefits", "affect", "affects", "impact", "useful", "matter", "matters",
+    "help", "helps", "ensure", "differ", "difference", "differences", "similar", "similarity",
+    "relationship", "relate", "characteristic", "characteristics", "key", "idea", "concept", "process",
+    "step", "steps", "example", "examples", "typically", "generally", "different", "type", "types",
+}
+# a question passes if at least this share of its topic words occur in the passage
+MIN_GROUNDING = 0.6
 
 
 @dataclass
 class QAItem:
     """One generated quiz entry."""
     question: str
-    answer: str
+    answer: str                      # the textbook answer (term for low, sentence for mid/high)
     keywords: List[str] = field(default_factory=list)
+    evidence: str = ""               # the textbook sentence the answer comes from
 
 
+# --------------------------------------------------------------------------- validation helpers
 def validate_request(num_questions: int, difficulty: str) -> None:
     """Enforce the project rules: difficulty in {low, mid, high}; count is a multiple of 5, max 30."""
     if difficulty not in DIFFICULTY_LEVELS:
@@ -58,10 +82,7 @@ def validate_request(num_questions: int, difficulty: str) -> None:
 
 
 def _tokens(text: str) -> set:
-    """
-    Lower-cased *content-word* set used for duplicate detection. Filler words ("what", "is", "the", ...)
-    are removed, otherwise "What is the function of X?" and "What is the function of Y?" would look identical.
-    """
+    """Lower-cased content-word set (filler words removed) used for duplicate detection."""
     words = re.findall(r"[a-z0-9]+", text.lower())
     content = {w for w in words if w not in ENGLISH_STOP_WORDS}
     return content or set(words)
@@ -77,50 +98,82 @@ def is_duplicate(question: str, seen: List[str], threshold: float = 0.7) -> bool
     return False
 
 
+def _stem(word: str) -> str:
+    """Very light plural stemmer ('pheromones' -> 'pheromone', 'ies' -> 'y')."""
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
+def _content_stems(text: str) -> set:
+    """Stemmed topic words of a text (stop-words and question filler removed)."""
+    words = re.findall(r"[a-z][a-z\-]{2,}", text.lower())
+    return {_stem(w) for w in words if w not in ENGLISH_STOP_WORDS and w not in QUESTION_FILLER}
+
+
+def is_grounded(question: str, cand: Candidate, min_overlap: float = MIN_GROUNDING) -> bool:
+    """
+    Accept a question only if
+      * at least `min_overlap` of its topic words occur in the passage (otherwise the model made something up), and
+      * it does not already contain its own (short) answer.
+    """
+    q = _content_stems(question)
+    if not q:
+        return False
+    context = _content_stems(cand.context + " " + cand.title)
+    if len(q & context) / len(q) < min_overlap:
+        return False
+    a = _content_stems(cand.answer)
+    if a and len(cand.answer.split()) <= 4 and a <= q:
+        return False
+    return True
+
+
+def make_keywords(cand: Candidate, difficulty: str) -> List[str]:
+    """Keywords of the answer: the answer term itself (low) plus TF-IDF key words of the supporting sentence."""
+    base = extract_keywords(cand.evidence if difficulty == "low" else cand.answer, cand.context, top_k=6)
+    if difficulty != "low":
+        return base
+    term = cand.answer.lower()
+    return [term] + [k for k in base if k not in term][:5]
+
+
+# --------------------------------------------------------------------------- model wrapper
 class QuestionGenerator:
-    """Wraps a Seq2Seq Transformer LLM and exposes (batched) question + answer generation."""
+    """Wraps a Seq2Seq Transformer LLM and exposes batched, answer-aware question generation."""
 
     def __init__(self, model_name: str = "google/flan-t5-base"):
         """
         Download (first run only) and load the tokenizer and model.
-        On an NVIDIA GPU the model runs in bfloat16 (about 2x faster, half the memory);
-        on CPU it runs in float32.
+        On an NVIDIA GPU the model runs in bfloat16 (faster, half the memory); on CPU in float32.
         """
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         dtype = torch.bfloat16 if self.device == "cuda" and torch.cuda.is_bf16_supported() else torch.float32
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name, torch_dtype=dtype).to(self.device).eval()
 
-    # ------------------------------------------------------------------ prompt builders
     @staticmethod
-    def build_question_prompt(context: str, difficulty: str) -> str:
-        """Compose the instruction prompt that steers the LLM towards the requested difficulty."""
-        return f"{DIFFICULTY_INSTRUCTIONS[difficulty]}\n\nPassage: {context}\n\nQuestion:"
+    def build_question_prompt(cand: Candidate, difficulty: str) -> str:
+        """
+        Answer-aware instruction prompt: tells the LLM which answer the question must have, the wanted
+        style (difficulty) and gives the passage (with its section title) to read.
+        """
+        passage = f"{cand.title}. {cand.context}" if cand.title else cand.context
+        return (f"{STYLE_HINTS[difficulty]} Generate a question that has the following answer: "
+                f"{cand.answer} for the following passage: {passage}")
 
-    @staticmethod
-    def build_answer_prompt(context: str, question: str) -> str:
-        """Prompt that asks the LLM to answer using only the passage (used to derive keywords)."""
-        return ("Answer the question using only the passage. "
-                "Reply with a complete answer in one or two sentences.\n\n"
-                f"Passage: {context}\n\nQuestion: {question}\n\nAnswer:")
-
-    # ------------------------------------------------------------------ low-level decoding
     def _generate_batch(self, prompts: List[str], max_new_tokens: int, sample: bool = False,
                         num_beams: int = 1) -> List[str]:
         """
-        Encode several prompts at once (padded into one tensor), run the encoder-decoder once
-        for the whole batch and decode every output. Batching is the main speed-up over
-        generating one passage at a time.
-
-        sample=False -> greedy search (num_beams=1) or beam search (num_beams>1, slower, better)
-        sample=True  -> nucleus sampling (used on retries to get a *different* question)
+        Encode several prompts at once (padded), run the encoder-decoder once for the whole batch and decode.
+        sample=False -> greedy (num_beams=1) or beam search (num_beams>1); sample=True -> nucleus sampling.
         """
         inputs = self.tokenizer(prompts, return_tensors="pt", padding=True,
                                 truncation=True, max_length=512).to(self.device)
-        if sample:
-            gen_args = dict(do_sample=True, top_p=0.92, temperature=0.9)
-        else:
-            gen_args = dict(do_sample=False, num_beams=num_beams)
+        gen_args = (dict(do_sample=True, top_p=0.92, temperature=0.9) if sample
+                    else dict(do_sample=False, num_beams=num_beams))
         with torch.inference_mode():
             output = self.model.generate(**inputs, max_new_tokens=max_new_tokens,
                                          no_repeat_ngram_size=3, **gen_args)
@@ -128,65 +181,50 @@ class QuestionGenerator:
 
     @staticmethod
     def _clean_question(raw: str) -> str:
-        """Tidy model output into a proper question; returns '' if it is unusable (too short)."""
+        """Tidy model output into a proper question; returns '' if unusable (too short)."""
         q = raw.strip().strip('"')
         if len(q.split()) < 4:
             return ""
         q = q[0].upper() + q[1:]
         return q if q.endswith("?") else q.rstrip(".") + "?"
 
-    # ------------------------------------------------------------------ public API
-    def generate_question(self, context: str, difficulty: str, sample: bool = False,
-                          num_beams: int = 1) -> str:
-        """Generate a single question for one passage (handy for demos / the notebook)."""
-        raw = self._generate_batch([self.build_question_prompt(context, difficulty)], 48, sample, num_beams)[0]
+    def generate_question(self, cand: Candidate, difficulty: str, sample: bool = False, num_beams: int = 1) -> str:
+        """Generate one question for one candidate (handy for demos / the notebook; no validation)."""
+        raw = self._generate_batch([self.build_question_prompt(cand, difficulty)], 48, sample, num_beams)[0]
         return self._clean_question(raw)
 
-    def generate_items(self, contexts: List[str], difficulty: str, num_beams: int = 1,
+    def generate_items(self, slots: List[List[Candidate]], difficulty: str, num_beams: int = 1,
                        batch_size: Optional[int] = None,
                        progress_callback: Optional[Callable[[float], None]] = None) -> List[QAItem]:
         """
-        Generate one unique question + answer + keywords for every passage in `contexts`.
+        Turn planned slots into validated questions.
 
-        Stage 1 (questions): passages are processed in batches. Passages whose question was empty or a
-                             near-duplicate are retried in later rounds using sampling.
-        Stage 2 (answers):   answers for all accepted questions are generated in batches, then keywords
-                             are extracted with TF-IDF.
-
-        progress_callback receives a float in [0, 1]. Passages that never yield a valid question are skipped,
-        so fewer items than passages may be returned.
+        Each round, every unfilled slot tries its next candidate (round 1: best sentence; later rounds:
+        alternative sentences from the same passage, or sampling if there is none).  A question is accepted
+        only if it passes the grounding, leak and duplicate checks.  Questions are generated in batches.
+        Returns items in document order; slots that never produce a valid question are skipped.
         """
         batch_size = batch_size or (8 if self.device == "cuda" else 4)
-        n = len(contexts)
-        questions: List[Optional[str]] = [None] * n
+        n = len(slots)
+        results: List[Optional[QAItem]] = [None] * n
 
-        def report(fraction: float) -> None:
-            if progress_callback:
-                progress_callback(min(fraction, 1.0))
-
-        # ---- stage 1: questions
         for attempt in range(MAX_ATTEMPTS):
-            pending = [i for i, q in enumerate(questions) if q is None]
+            pending = [i for i, r in enumerate(results) if r is None]
             if not pending:
                 break
-            for s in range(0, len(pending), batch_size):
-                idxs = pending[s:s + batch_size]
-                prompts = [self.build_question_prompt(contexts[i], difficulty) for i in idxs]
-                outputs = self._generate_batch(prompts, 48, sample=attempt > 0, num_beams=num_beams)
-                for i, raw in zip(idxs, outputs):
-                    q = self._clean_question(raw)
-                    if q and not is_duplicate(q, [x for x in questions if x]):
-                        questions[i] = q
-                report(0.6 * sum(q is not None for q in questions) / n)
-
-        # ---- stage 2: answers + keywords
-        keep = [i for i, q in enumerate(questions) if q]
-        answers = {}
-        for s in range(0, len(keep), batch_size):
-            idxs = keep[s:s + batch_size]
-            prompts = [self.build_answer_prompt(contexts[i], questions[i]) for i in idxs]
-            for i, ans in zip(idxs, self._generate_batch(prompts, 64)):
-                answers[i] = ans
-            report(0.6 + 0.4 * min(s + batch_size, len(keep)) / len(keep))
-
-        return [QAItem(questions[i], answers[i], extract_keywords(answers[i], contexts[i])) for i in keep]
+            # (slot index, candidate, use_sampling): sample only when no new candidate is left to try
+            jobs = [(i, slots[i][min(attempt, len(slots[i]) - 1)], attempt >= len(slots[i])) for i in pending]
+            for use_sampling in (False, True):
+                group = [j for j in jobs if j[2] == use_sampling]
+                for s in range(0, len(group), batch_size):
+                    batch = group[s:s + batch_size]
+                    prompts = [self.build_question_prompt(c, difficulty) for _, c, _ in batch]
+                    outputs = self._generate_batch(prompts, 48, sample=use_sampling, num_beams=num_beams)
+                    for (i, cand, _), raw in zip(batch, outputs):
+                        q = self._clean_question(raw)
+                        accepted = [r.question for r in results if r]
+                        if q and is_grounded(q, cand) and not is_duplicate(q, accepted):
+                            results[i] = QAItem(q, cand.answer, make_keywords(cand, difficulty), cand.evidence)
+                    if progress_callback:
+                        progress_callback(sum(r is not None for r in results) / n)
+        return [r for r in results if r]
