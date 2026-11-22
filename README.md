@@ -1,113 +1,121 @@
 # 📚 QuizForge – Automatic Question Generation from Textbooks
 
-An NLP project that reads a textbook (**PDF or Word**, max **5 MB**) and generates exam-style questions at a chosen
-**difficulty (Low / Mid / High)** and **quantity (5, 10, 15, 20, 25 or 30)**. After generation, an
-**"Answer the questions"** button reveals the **keywords of each answer** (plus the answer and its source sentence).
+QuizForge reads a whole textbook (**PDF or Word**), detects its **chapters and topics**, and generates exam-style
+questions of several **types** at a chosen **difficulty** (Low / Mid / High) and **quantity** (5–30, step 5).
+Questions can be **sorted and filtered by topic**, revealed with **answer keywords**, and **rated 1–5 stars**; the
+rating comments are analysed with a Transformer **sentiment** model.
 
 ## 1. Key NLP / AI concepts
 
 | Concept | Where it is used |
 |---|---|
-| **Seq2Seq** | Flan-T5 is an *encoder–decoder* model: the encoder reads *instruction + answer + passage*, the decoder writes the question token by token (`qgen/generator.py`). |
-| **Transformers** | Both encoder and decoder are Transformer stacks (self-/cross-attention), loaded through Hugging Face `transformers` (`AutoModelForSeq2SeqLM`). |
-| **LLM** | Flan-T5 is an *instruction-tuned* language model. The difficulty is controlled by **prompt engineering** (a different instruction per level, Bloom's-taxonomy style). |
+| **Seq2Seq** | Flan-T5 is an *encoder–decoder*: the encoder reads *instruction + answer + passage*, the decoder writes the question token by token (`qgen/generator.py`). |
+| **Transformers** | Flan-T5 (question writing) and DistilBERT-SST-2 (sentiment) are Transformer models loaded via Hugging Face `transformers`. |
+| **LLM** | Flan-T5 is instruction-tuned; difficulty and style are controlled by prompt wording (prompt engineering). |
+| **Sentiment analysis** | DistilBERT fine-tuned on SST-2 classifies the users' comments on questions (`qgen/feedback.py`). |
+| **Classical NLP** | Layout/heading detection, sentence splitting, TF-IDF sentence scoring, keyword extraction, TF-IDF similarity for wrong options. |
 
-Classical NLP surrounds the neural core: layout/heading detection, sentence splitting, **TF-IDF** sentence scoring and keyword extraction.
+## 2. Features
 
-## 2. How it works (answer-aware question generation)
+0. **Soft (neumorphic) olive-and-cream UI** – raised cards/buttons and pressed-in inputs on a cream page, olive accents, brown
+   text (palette `#556B2F` · `#FCF8D9` · `#5B4733`). Colours come from `.streamlit/config.toml`; the soft shadows from
+   `assets/neumorphic.css`. A sidebar switch turns the soft skin off for a flat, higher-contrast look.
+
+1. **Whole textbooks** – upload limit is 1000 MB (`.streamlit/config.toml`); pages are read one by one with live progress,
+   running headers/footers/page numbers are removed.
+2. **Chapters & topics** – detected from `Chapter N`, numbered sections (`3.1 …`), Word Heading styles and heading-like
+   lines. Choose *Whole document* or only some chapters/topics before generating.
+3. **Question types** (choose one or several; the count is split evenly):
+
+   | Type | How it is made | How difficulty works |
+   |---|---|---|
+   | Subjective | Flan-T5 writes a question for a sentence chosen from the book | Low: factual (term) · Mid: explain/describe · High: reasoning sentence (why/how) |
+   | MCQ | Flan-T5 writes the question for a key term; 3 wrong options from other terms in the book | Wrong options: Low = unrelated parts, Mid = same chapter, High = most similar terms |
+   | Fill in the blanks | Textbook sentence with its key term blanked | High blanks two words |
+   | True / False | Textbook sentence, or the same sentence with its term swapped for another term | Swapped term: far (low) … most similar (high) |
+   | Match the pair | 4 terms ↔ 4 descriptions from definitions in the book | Low = far-apart terms, Mid = same chapter, High = similar descriptions |
+4. **Sort by topic** – group by *Document order*, *Topic (A–Z)*, *Chapter → Topic* or *Question type*; filter by topic/type.
+5. **Live progress** – every backend step is shown by name (e.g. *Reading document – page 120 of 480*) with a progress bar
+   and a ✅/⏳/▫️ stage checklist.
+6. **Answers** – *Answer the questions* shows keywords, the answer and its source sentence.
+7. **Feedback + sentiment analysis** – rate each question's relevance to its topic (1–5 stars) and optionally comment.
+   *Analyze feedback* classifies comments (positive / mixed / negative), shows average relevance, star distribution,
+   relevance per topic (weakest first) and flags questions with ≤ 2 stars or a negative comment. CSV download included.
+
+## 3. How it works
 
 ```
-PDF / DOCX ─► text + line structure ─► section-aware passages (title + text)
-                                              │
-              pick WHAT to ask: answer candidates (TF-IDF scored) spread over the book
-                                              ▼
-   Streamlit UI ◄─ keywords (TF-IDF) ◄─ checks ◄─ Flan-T5 writes a question FOR that answer
+PDF/DOCX → pages → remove headers/footers → chapters/topics → passages (never cross a topic)
+              │
+   scope (all / chosen topics) → answer candidates (TF-IDF) → per type:
+        Subjective, MCQ : Flan-T5 writes question → quality checks → (MCQ) add wrong options
+        Fill/TrueFalse/Match : built directly from the sentences (no model, cannot hallucinate)
+              │
+   sort in book order → UI (group/filter) → ratings + comments → DistilBERT sentiment → summary
 ```
+**Quality checks** for LLM questions: topic words must appear in the passage (no invented topics), the question must
+not contain its own short answer, no near-duplicates; failed slots retry with another sentence of the same passage.
+Answers always come from the book text, never from the model.
 
-1. **Extraction** – `pypdf` / `python-docx` read the file and keep line breaks.
-2. **Section-aware passages** – headings are detected (short lines without final punctuation, Word heading styles);
-   bullets/numbered items are re-joined; each passage stays inside one section and carries its title. Syllabus /
-   contents / reference sections are skipped.
-3. **Answer candidates** (`qgen/candidates.py`) – the *answer* is chosen from the book first:
-   * **Low** – a key term (from `Term: definition` or `X is a …` sentences)
-   * **Mid** – an informative sentence (explain / describe style)
-   * **High** – a sentence with reasoning cues (because, helps, prevents, advantage, balance …)
+## 4. Tech stack
 
-   Sentences are ranked by document-level TF-IDF; passages are spread evenly over the whole book.
-4. **Question generation** – Flan-T5 receives *style hint + answer + passage* and writes the question
-   (batched; greedy by default, optional beam search).
-5. **Quality checks** – a question is accepted only if (a) its topic words appear in the passage (no hallucinated
-   topics), (b) it does not already contain its short answer, (c) it is not a near-duplicate. Otherwise the slot is
-   retried with another sentence from the same passage.
-6. **Answers & keywords** – the answer is the textbook text itself (it cannot be invented by the model); TF-IDF
-   extracts its keywords.
+**Frontend** – Streamlit (`st.status`, `st.progress`, `st.feedback` star widget, charts), custom HTML/CSS.
+**Backend** – Python 3.9+, PyTorch, Hugging Face Transformers + SentencePiece (Flan-T5 Small/Base/Large, DistilBERT-SST-2),
+scikit-learn (TF-IDF), NumPy, pandas, pypdf, python-docx.
 
-## 3. Tech stack
-
-**Frontend**
-* Python **Streamlit** – web UI, widgets (file uploader, select-sliders, progress bar, download button)
-* Custom **HTML + CSS** injected via `st.markdown` (gradient header, question cards, keyword chips)
-
-**Backend**
-* **Python 3.9+**
-* **PyTorch** – tensor / GPU computation (bfloat16 on NVIDIA GPUs)
-* **Hugging Face Transformers** + **SentencePiece** – Flan-T5 (Small / Base / Large) Seq2Seq LLM and tokenizer
-* **scikit-learn** – TF-IDF scoring and keyword extraction
-* **NumPy** – even sampling of passages
-* **pypdf** and **python-docx** – PDF and Word parsing
-
-## 4. Project structure
+## 5. Project structure
 
 ```
 question-generator/
 ├── app.py                  # Streamlit UI
-├── requirements.txt        # all dependencies
-├── README.md               # this documentation
-├── .gitignore              # files excluded from Git
-├── .streamlit/config.toml  # server config (5 MB upload limit)
-├── notebooks/
-│   └── question_generation_demo.ipynb   # step-by-step demo of the pipeline (no UI)
+├── requirements.txt
+├── README.md
+├── .gitignore
+├── .streamlit/config.toml  # upload limit (1000 MB) + colour theme
+├── assets/
+│   ├── base.css            # flat styles for QuizForge's own components
+│   └── neumorphic.css      # soft-UI skin (shadows, inset inputs, Streamlit widget overrides)
+├── notebooks/question_generation_demo.ipynb
 └── qgen/
-    ├── extractor.py        # file reading, heading detection, section-aware chunking
-    ├── candidates.py       # chooses the answers (terms / sentences) the questions will be about
-    ├── generator.py        # Seq2Seq LLM: prompts, batched generation, quality checks
-    ├── keywords.py         # TF-IDF keyword extraction
-    └── pipeline.py         # end-to-end orchestration
+    ├── extractor.py        # PDF/DOCX reading, header/footer removal, chapter/topic detection, chunking
+    ├── candidates.py       # answer selection + TermPool (wrong options)
+    ├── qtypes.py           # fill-blank, true/false, match builders, MCQ options
+    ├── generator.py        # Seq2Seq LLM prompts, batching, quality checks
+    ├── pipeline.py         # orchestration with named progress stages
+    ├── progress.py         # weighted stage progress tracker
+    ├── feedback.py         # ratings + sentiment analysis + summary
+    ├── formatting.py       # question/answer text for all types
+    ├── keywords.py         # TF-IDF keywords
+    └── schema.py           # shared data classes, types, validation
 ```
 
-## 5. Installation & run
+## 6. Installation & run
 
 ```bash
-# 1. (recommended) create a virtual environment
 python -m venv venv
 source venv/bin/activate          # Windows:  venv\Scripts\activate
-
-# 2. install every requirement
-pip install -r requirements.txt
-#    NVIDIA GPU? install a CUDA build of PyTorch first: https://pytorch.org/get-started/locally/
-
-# 3. start the app (run from the project folder so .streamlit/config.toml is used)
-streamlit run app.py
+pip install -r requirements.txt   # NVIDIA GPU? install a CUDA build of PyTorch first
+streamlit run app.py              # run from the project folder so .streamlit/config.toml is used
 ```
-Open http://localhost:8501. The first generation downloads the chosen model (Base ≈ 1 GB) and needs internet once.
-
-## 6. Usage
-1. Upload a `.pdf` or `.docx` textbook, **maximum 5 MB** (must contain selectable text – scanned images are not supported).
-2. Choose the **difficulty** and the **number of questions** (5–30, step 5).
-3. Click **Generate questions**.
-4. Click **Answer the questions (show keywords)** to see the keywords, the answer and its source sentence.
-5. Optionally download the questions as `.txt`.
+First use downloads Flan-T5 (Base ≈ 1 GB) and, when comments are analysed, DistilBERT-SST-2 (≈ 270 MB).
 
 ## 7. Known limitations (please read)
-* Flan-T5 is a small LLM: some questions can still be awkwardly worded, and the difficulty match is approximate
-  (it is mostly set by *which sentence* is chosen as the answer). **Flan-T5 Large** and the *Better quality* mode help.
-* Quality depends on document structure. Notes/slides/textbooks with headings and `Term: definition` lines work best;
-  long unstructured prose, tables, formulas and code listings work worse.
-* If the document has too few suitable sentences, fewer questions than requested are returned.
-* Heading detection is heuristic (it can mistake a short line for a heading or miss one).
-* Speed: GPU strongly recommended (the sidebar shows whether one was detected). On CPU use Flan-T5 Small or Base in Fast mode.
-* Uploads are limited to 5 MB. Scanned PDFs need OCR first.
+* **Upload size** – Streamlit cannot be "unlimited"; the limit is set to 1000 MB. Very large files need RAM and time
+  (the progress panel shows the reading speed). Scanned PDFs need OCR first.
+* **Structure matters** – chapters/topics come from heading detection, which is heuristic. Books with clear headings work
+  best; headless prose gets automatic keyword-based topic names. Headings can occasionally be missed or misjudged.
+* **Question wording** – Flan-T5 is small; some Subjective/MCQ questions can be awkward. Use *Large* or *Better quality* mode.
+* **Few definitions** – Match the pair and some MCQ/True-False questions need `Term: definition` / `X is a …` sentences;
+  fewer questions than requested are returned (with a warning) when the text has too few.
+* **Match / mixed-topic questions** – a match set is filed under the topic of its first term.
+* **Sentiment** – the SST-2 model is English-only and has no neutral class (low-confidence results are shown as "mixed").
+  Star ratings alone are ratings, not sentiment; sentiment analysis is applied to the *comments*.
+  Feedback does not yet change future generation.
+* **Neumorphic theme** – the soft look relies on CSS selectors of Streamlit's internal elements, which can change between
+  Streamlit versions (it was checked on Streamlit 1.67 in Chromium). If a rule stops matching, that widget just keeps the
+  plain olive/cream theme. Soft shadows have low contrast by design; use the sidebar switch for a flatter look. Pick the
+  default/custom theme (not "Dark") in Streamlit's Settings menu.
+* **Speed** – a GPU is strongly recommended; the sidebar shows whether one was detected.
 
 ## 8. Possible extensions
-Fine-tune T5 on SQuAD/RACE for question generation, round-trip QA verification (answer the question with a QA model and
-compare), swap in a larger LLM, add multiple-choice distractors, OCR support, automatic difficulty scoring.
+Regenerate flagged questions automatically, fine-tune T5 on SQuAD/RACE, QA-based answer verification, OCR, multilingual support.

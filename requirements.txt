@@ -1,5 +1,5 @@
 # ---- Frontend ----
-streamlit>=1.35.0
+streamlit>=1.38.0        # needs st.feedback (star ratings)
 
 # ---- NLP / Deep Learning backend ----
 torch>=2.1.0              # tensor engine (CPU or CUDA)
@@ -12,3 +12,5 @@ numpy>=1.24.0
 # ---- Document parsing ----
 pypdf>=4.0.0              # PDF text extraction
 python-docx>=1.1.0        # Word (.docx) text extraction
+
+pandas>=2.0.0             # tables/charts in the feedback dashboard

@@ -1,0 +1,15 @@
+/* Base styles for QuizForge's own components (flat version – always loaded). */
+.hero {background: linear-gradient(120deg,#556B2F,#6B8340); padding: 2rem 2.2rem; border-radius: 18px;
+       color: #FCF8D9; margin-bottom: 1.4rem;}
+.hero h1 {margin: 0; font-size: 2.2rem; color:#FCF8D9;}
+.hero p {margin: .4rem 0 0; opacity: .92; font-size: 1.02rem;}
+.q-card {background: rgba(91,71,51,.07); border-left: 5px solid #556B2F; border-radius: 12px;
+         padding: 1rem 1.2rem; margin: .8rem 0 .2rem;}
+.q-card .num {color:#556B2F; font-weight: 700; margin-right: .5rem;}
+.q-card .opt {margin: .15rem 0 .15rem 1.6rem;}
+.tag {display:inline-block; font-size:.72rem; padding:.1rem .6rem; border-radius:999px; margin: 0 .4rem .5rem 0;
+      background: rgba(85,107,47,.18); color:#435524; font-weight:600;}
+.tag.topic {background: rgba(91,71,51,.14); color:#5B4733;}
+.chip {display:inline-block; background:#556B2F; color:#FCF8D9; padding: .2rem .75rem; border-radius: 999px;
+       margin: .35rem .35rem 0 0; font-size: .85rem;}
+.q-card .opt-head {font-weight: 700; color:#435524; margin: .7rem 0 .1rem; font-size:.8rem; letter-spacing:.4px; text-transform: uppercase;}

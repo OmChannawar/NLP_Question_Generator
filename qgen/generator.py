@@ -27,6 +27,7 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 from .candidates import Candidate
 from .keywords import extract_keywords
+from .schema import ALLOWED_COUNTS, DIFFICULTY_LEVELS, QAItem, validate_request  # noqa: F401 (re-exported)
 
 # --------------------------------------------------------------------------- configuration
 MODEL_OPTIONS = {
@@ -34,17 +35,22 @@ MODEL_OPTIONS = {
     "Flan-T5 Base   (recommended, ~250M)": "google/flan-t5-base",
     "Flan-T5 Large  (best quality, ~780M)": "google/flan-t5-large",
 }
-DIFFICULTY_LEVELS = ["low", "mid", "high"]
-ALLOWED_COUNTS = [5, 10, 15, 20, 25, 30]  # multiples of 5, max 30
 MAX_ATTEMPTS = 4  # rounds per question slot; later rounds use the next candidate / sampling
 
-# Style hint per difficulty level (aligned with Bloom's taxonomy).
+# Style hint per question type and difficulty level (aligned with Bloom's taxonomy).
 STYLE_HINTS = {
-    "low": "The question must be a simple factual question starting with What, Which, Who or Where.",
-    "mid": "The question must ask the student to explain or describe an idea, for example starting with "
-           "How or Explain.",
-    "high": "The question must be challenging and need reasoning, such as why something works or how "
-            "two things compare.",
+    "subjective": {
+        "low": "The question must be a simple factual question starting with What, Which, Who or Where.",
+        "mid": "The question must ask the student to explain or describe an idea, for example starting with "
+               "How or Explain.",
+        "high": "The question must be challenging and need reasoning, such as why something works or how "
+                "two things compare.",
+    },
+    "mcq": {  # the answer is a single term; the question must not name it
+        "low": "The question must be a simple factual question starting with What or Which that has one short answer.",
+        "mid": "The question must describe the purpose or role of the concept and ask which concept it is.",
+        "high": "The question must describe a situation or property that needs reasoning to identify the concept.",
+    },
 }
 # words that appear in questions but carry no topic information
 QUESTION_FILLER = {
@@ -63,24 +69,7 @@ QUESTION_FILLER = {
 MIN_GROUNDING = 0.6
 
 
-@dataclass
-class QAItem:
-    """One generated quiz entry."""
-    question: str
-    answer: str                      # the textbook answer (term for low, sentence for mid/high)
-    keywords: List[str] = field(default_factory=list)
-    evidence: str = ""               # the textbook sentence the answer comes from
-
-
 # --------------------------------------------------------------------------- validation helpers
-def validate_request(num_questions: int, difficulty: str) -> None:
-    """Enforce the project rules: difficulty in {low, mid, high}; count is a multiple of 5, max 30."""
-    if difficulty not in DIFFICULTY_LEVELS:
-        raise ValueError(f"Difficulty must be one of {DIFFICULTY_LEVELS}.")
-    if num_questions % 5 != 0 or not 5 <= num_questions <= 30:
-        raise ValueError("Number of questions must be a multiple of 5 between 5 and 30.")
-
-
 def _tokens(text: str) -> set:
     """Lower-cased content-word set (filler words removed) used for duplicate detection."""
     words = re.findall(r"[a-z0-9]+", text.lower())
@@ -131,13 +120,12 @@ def is_grounded(question: str, cand: Candidate, min_overlap: float = MIN_GROUNDI
     return True
 
 
-def make_keywords(cand: Candidate, difficulty: str) -> List[str]:
-    """Keywords of the answer: the answer term itself (low) plus TF-IDF key words of the supporting sentence."""
-    base = extract_keywords(cand.evidence if difficulty == "low" else cand.answer, cand.context, top_k=6)
-    if difficulty != "low":
-        return base
+def make_keywords(cand: Candidate) -> List[str]:
+    """Keywords of the answer: the term itself (term answers) plus TF-IDF key words of the supporting sentence."""
+    if cand.kind != "term":
+        return extract_keywords(cand.answer, cand.context, top_k=6)
     term = cand.answer.lower()
-    return [term] + [k for k in base if k not in term][:5]
+    return [term] + [k for k in extract_keywords(cand.evidence, cand.context, top_k=5) if k not in term][:5]
 
 
 # --------------------------------------------------------------------------- model wrapper
@@ -155,13 +143,13 @@ class QuestionGenerator:
         self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name, torch_dtype=dtype).to(self.device).eval()
 
     @staticmethod
-    def build_question_prompt(cand: Candidate, difficulty: str) -> str:
+    def build_question_prompt(cand: Candidate, difficulty: str, qtype: str = "subjective") -> str:
         """
         Answer-aware instruction prompt: tells the LLM which answer the question must have, the wanted
         style (difficulty) and gives the passage (with its section title) to read.
         """
         passage = f"{cand.title}. {cand.context}" if cand.title else cand.context
-        return (f"{STYLE_HINTS[difficulty]} Generate a question that has the following answer: "
+        return (f"{STYLE_HINTS[qtype][difficulty]} Generate a question that has the following answer: "
                 f"{cand.answer} for the following passage: {passage}")
 
     def _generate_batch(self, prompts: List[str], max_new_tokens: int, sample: bool = False,
@@ -188,13 +176,14 @@ class QuestionGenerator:
         q = q[0].upper() + q[1:]
         return q if q.endswith("?") else q.rstrip(".") + "?"
 
-    def generate_question(self, cand: Candidate, difficulty: str, sample: bool = False, num_beams: int = 1) -> str:
+    def generate_question(self, cand: Candidate, difficulty: str, sample: bool = False, num_beams: int = 1,
+                          qtype: str = "subjective") -> str:
         """Generate one question for one candidate (handy for demos / the notebook; no validation)."""
-        raw = self._generate_batch([self.build_question_prompt(cand, difficulty)], 48, sample, num_beams)[0]
+        raw = self._generate_batch([self.build_question_prompt(cand, difficulty, qtype)], 48, sample, num_beams)[0]
         return self._clean_question(raw)
 
     def generate_items(self, slots: List[List[Candidate]], difficulty: str, num_beams: int = 1,
-                       batch_size: Optional[int] = None,
+                       batch_size: Optional[int] = None, qtype: str = "subjective",
                        progress_callback: Optional[Callable[[float], None]] = None) -> List[QAItem]:
         """
         Turn planned slots into validated questions.
@@ -218,13 +207,14 @@ class QuestionGenerator:
                 group = [j for j in jobs if j[2] == use_sampling]
                 for s in range(0, len(group), batch_size):
                     batch = group[s:s + batch_size]
-                    prompts = [self.build_question_prompt(c, difficulty) for _, c, _ in batch]
+                    prompts = [self.build_question_prompt(c, difficulty, qtype) for _, c, _ in batch]
                     outputs = self._generate_batch(prompts, 48, sample=use_sampling, num_beams=num_beams)
                     for (i, cand, _), raw in zip(batch, outputs):
                         q = self._clean_question(raw)
                         accepted = [r.question for r in results if r]
                         if q and is_grounded(q, cand) and not is_duplicate(q, accepted):
-                            results[i] = QAItem(q, cand.answer, make_keywords(cand, difficulty), cand.evidence)
+                            results[i] = QAItem(q, cand.answer, make_keywords(cand), cand.evidence, qtype,
+                                            cand.chapter, cand.title, cand.chunk_id)
                     if progress_callback:
                         progress_callback(sum(r is not None for r in results) / n)
         return [r for r in results if r]

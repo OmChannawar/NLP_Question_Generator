@@ -1,3 +1,13 @@
 [server]
-# Hard limit enforced by Streamlit's uploader widget (in MB)
-maxUploadSize = 5
+# Largest upload accepted by Streamlit's uploader, in MB (default is 200). Whole textbooks are fine.
+maxUploadSize = 1000
+
+[theme]
+# Olive green & cream palette (#556B2F, #FCF8D9, #5B4733). The soft "neumorphic" look itself is
+# added by assets/neumorphic.css; these colours also work without it.
+base = "light"
+primaryColor = "#556B2F"
+backgroundColor = "#FCF8D9"
+secondaryBackgroundColor = "#F3EDC4"
+textColor = "#5B4733"
+font = "sans serif"

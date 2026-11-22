@@ -1,0 +1,109 @@
+/* ============================================================================
+   QuizForge – neumorphic (soft UI) skin.  Palette: olive #556B2F · cream #FCF8D9 · brown #5B4733.
+   Elements share the page colour and are "raised" or "pressed" with a light + a dark shadow.
+   Streamlit's internal selectors (data-testid / data-baseweb) can change between versions; every rule
+   below is cosmetic, so a selector that stops matching only falls back to the plain theme look.
+   ============================================================================ */
+:root {
+  --olive: #556B2F; --olive-dark: #435524; --olive-light: #6B8340;
+  --cream: #FCF8D9; --cream-deep: #F0EAC0; --brown: #5B4733; --brown-soft: #7D6850;
+  --sh-dark: rgba(91, 71, 51, .26); --sh-light: rgba(255, 255, 255, .95);
+  --raised: 9px 9px 20px var(--sh-dark), -9px -9px 20px var(--sh-light);
+  --raised-sm: 5px 5px 11px var(--sh-dark), -5px -5px 11px var(--sh-light);
+  --raised-xs: 3px 3px 7px var(--sh-dark), -3px -3px 7px var(--sh-light);
+  --inset: inset 5px 5px 10px var(--sh-dark), inset -5px -5px 10px var(--sh-light);
+  --inset-sm: inset 3px 3px 6px var(--sh-dark), inset -3px -3px 6px var(--sh-light);
+}
+
+/* ---------- page, sidebar, text ---------- */
+.stApp, [data-testid="stAppViewContainer"] { background: var(--cream); color: var(--brown); }
+[data-testid="stHeader"] { background: transparent; }
+[data-testid="stSidebar"] { background: var(--cream); box-shadow: 8px 0 18px var(--sh-dark); }
+[data-testid="stSidebar"] > div:first-child { background: transparent; }
+h1, h2, h3, h4, h5, label, p, li, [data-testid="stMarkdownContainer"] { color: var(--brown); }
+h2 { letter-spacing: .2px; }
+[data-testid="stCaptionContainer"], .stCaption { color: var(--brown-soft); }
+hr { border: none; height: 3px; border-radius: 3px; background: var(--cream); box-shadow: var(--inset-sm); }
+
+/* ---------- hero banner ---------- */
+.hero { background: linear-gradient(145deg, var(--olive-light), var(--olive-dark)); color: var(--cream);
+        border-radius: 28px; padding: 2.1rem 2.4rem; box-shadow: var(--raised); }
+.hero h1, .hero p { color: var(--cream); }
+
+/* ---------- question cards, tags, options, keyword chips ---------- */
+.q-card { background: var(--cream); border: none; border-radius: 22px; box-shadow: var(--raised);
+          padding: 1.2rem 1.5rem; margin: 1.3rem 0 .6rem; color: var(--brown); line-height: 1.55; }
+.q-card .num { color: var(--olive); font-weight: 800; margin-right: .55rem; }
+.q-card .opt-head { color: var(--olive-dark); font-weight: 800; font-size: .78rem; letter-spacing: .5px;
+                    text-transform: uppercase; margin: .9rem 0 .1rem .2rem; }
+.q-card .opt { background: var(--cream); border-radius: 12px; box-shadow: var(--inset-sm);
+               margin: .5rem 0 .2rem 0; padding: .45rem .9rem; }
+.tag { background: var(--cream); color: var(--olive-dark); box-shadow: var(--inset-sm);
+       padding: .18rem .8rem; font-weight: 700; letter-spacing: .2px; }
+.tag.topic { color: var(--brown); background: var(--cream); }
+.chip { background: linear-gradient(145deg, var(--olive-light), var(--olive)); color: var(--cream);
+        box-shadow: var(--raised-xs); padding: .28rem .95rem; margin: .5rem .5rem 0 0; }
+
+/* ---------- buttons ---------- */
+[data-testid="stBaseButton-secondary"], .stDownloadButton button, [data-testid="stBaseButton-secondaryFormSubmit"] {
+  background: var(--cream); color: var(--brown); border: none; border-radius: 16px; font-weight: 700;
+  padding: .6rem 1.3rem; box-shadow: var(--raised-sm); transition: box-shadow .15s ease, transform .15s ease; }
+[data-testid="stBaseButton-primary"] {
+  background: linear-gradient(145deg, var(--olive-light), var(--olive)); border: none; border-radius: 16px;
+  font-weight: 700; padding: .65rem 1.5rem; box-shadow: var(--raised-sm);
+  transition: box-shadow .15s ease, transform .15s ease; }
+[data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primary"] * { color: var(--cream) !important; }
+[data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-secondary"] *,
+.stDownloadButton button, .stDownloadButton button * { color: var(--brown) !important; }
+[data-testid="stBaseButton-secondary"]:hover, .stDownloadButton button:hover, [data-testid="stBaseButton-primary"]:hover {
+  box-shadow: var(--raised); transform: translateY(-1px); }
+[data-testid="stBaseButton-secondary"]:active, .stDownloadButton button:active, [data-testid="stBaseButton-primary"]:active {
+  box-shadow: var(--inset); transform: translateY(0); }
+[data-testid="stBaseButton-primary"]:disabled { background: var(--cream); box-shadow: var(--inset-sm); opacity: .7; }
+[data-testid="stBaseButton-primary"]:disabled, [data-testid="stBaseButton-primary"]:disabled * { color: var(--brown-soft) !important; }
+
+/* ---------- inputs (pressed-in): current Streamlit + older BaseWeb selectors ---------- */
+[data-testid="stTextInputRootElement"], [data-testid="stNumberInputContainer"],
+[data-testid="stSelectbox"] div[role="group"], [data-testid="stMultiSelect"] div[role="group"],
+div[data-baseweb="input"], div[data-baseweb="textarea"], div[data-baseweb="select"] > div {
+  background: var(--cream) !important; border: none !important; border-radius: 16px !important;
+  box-shadow: var(--inset) !important; color: var(--brown) !important; }
+[data-testid="stTextInputRootElement"] input, [data-testid="stSelectbox"] input, [data-testid="stMultiSelect"] input,
+div[data-baseweb="base-input"], div[data-baseweb="base-input"] input { background: transparent !important; color: var(--brown) !important; }
+[data-testid="stMultiSelectTagsContainer"] [role="group"] > span, span[data-baseweb="tag"] {
+  background: linear-gradient(145deg, var(--olive-light), var(--olive)) !important; color: var(--cream) !important;
+  border-radius: 999px !important; box-shadow: var(--raised-xs); }
+[data-testid="stMultiSelectTagsContainer"] [role="group"] > span *, span[data-baseweb="tag"] * { color: var(--cream) !important; }
+[data-baseweb="popover"] > div, [data-baseweb="menu"], ul[role="listbox"], [data-testid="stSelectboxVirtualDropdown"] {
+  background: var(--cream) !important; border-radius: 16px !important; box-shadow: var(--raised) !important; border: none !important; }
+li[role="option"] { color: var(--brown) !important; }
+li[role="option"]:hover, li[aria-selected="true"] { background: var(--cream-deep) !important; }
+
+/* ---------- sliders ---------- */
+[data-testid="stSlider"] div:has(> [data-testid="stSliderThumbValue"]), [data-testid="stSlider"] [role="slider"] {
+  background: linear-gradient(145deg, var(--olive-light), var(--olive)) !important;
+  box-shadow: var(--raised-xs) !important; border: 3px solid var(--cream) !important; }
+[data-testid="stSlider"] [data-testid="stSliderThumbValue"] { color: var(--olive-dark); font-weight: 700; }
+
+/* ---------- star ratings (images): recolour the default yellow towards olive ---------- */
+[data-testid="stFeedback"] img { filter: hue-rotate(34deg) saturate(.55) brightness(.68); }
+
+/* ---------- file uploader ---------- */
+[data-testid="stFileUploaderDropzone"] { background: var(--cream); border: none; border-radius: 22px;
+  box-shadow: var(--inset); padding: 1.4rem; }
+
+/* ---------- expander / status panel, alerts, metrics, tables, charts, progress ---------- */
+[data-testid="stExpander"], [data-testid="stStatus"] { background: var(--cream); border: none !important;
+  border-radius: 20px; box-shadow: var(--raised-sm); }
+[data-testid="stExpander"] details, [data-testid="stStatus"] details { border: none !important; }
+[data-testid="stAlert"] { border: none; border-radius: 18px; box-shadow: var(--raised-sm); }
+[data-testid="stMetric"] { background: var(--cream); border-radius: 20px; box-shadow: var(--raised-sm);
+  padding: 1rem 1.3rem; }
+[data-testid="stMetricValue"] { color: var(--olive-dark); }
+[data-testid="stDataFrame"], [data-testid="stArrowVegaLiteChart"], [data-testid="stVegaLiteChart"] {
+  background: var(--cream); border-radius: 20px; box-shadow: var(--raised-sm); padding: .6rem; overflow: hidden; }
+[data-testid="stProgress"] [role="progressbar"] { background: var(--cream) !important; border-radius: 999px;
+  box-shadow: var(--inset-sm); }
+[data-testid="stProgressBarTrack"] { background: transparent !important; }
+[data-testid="stProgressBarTrack"] > div { background: linear-gradient(90deg, var(--olive), var(--olive-light)) !important;
+  border-radius: 999px; }
